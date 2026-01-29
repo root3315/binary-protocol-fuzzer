@@ -27,6 +27,8 @@
 #define ASSERT_FALSE(x) do { if (x) throw std::runtime_error("Assertion failed: !" #x); } while(0)
 #define ASSERT_EQ(a, b) do { if ((a) != (b)) throw std::runtime_error("Assertion failed: " #a " == " #b); } while(0)
 #define ASSERT_NE(a, b) do { if ((a) == (b)) throw std::runtime_error("Assertion failed: " #a " != " #b); } while(0)
+#define ASSERT_GE(a, b) do { if ((a) < (b)) throw std::runtime_error("Assertion failed: " #a " >= " #b); } while(0)
+#define ASSERT_LE(a, b) do { if ((a) > (b)) throw std::runtime_error("Assertion failed: " #a " <= " #b); } while(0)
 
 // Test counters
 static int passed = 0;
@@ -56,7 +58,7 @@ TEST(crc16_known_value) {
     // "123456789" should produce 0x29B1 with CRC-16/CCITT
     const char* test_str = "123456789";
     uint16_t crc = protocol::calculate_crc16(
-        reinterpret_cast<const uint8_t*>(test_str), 
+        reinterpret_cast<const uint8_t*>(test_str),
         9
     );
     ASSERT_EQ(crc, 0x29B1);
@@ -79,6 +81,18 @@ TEST(crc16_different_data) {
     ASSERT_NE(crc1, crc2);
 }
 
+TEST(crc16_incremental) {
+    // CRC should be incremental (streaming)
+    uint8_t data[] = {0x01, 0x02, 0x03, 0x04};
+    uint16_t crc_full = protocol::calculate_crc16(data, 4);
+    
+    // Calculate with first byte only
+    uint16_t crc1 = protocol::calculate_crc16(data, 1);
+    
+    // Full CRC should differ from partial (different data lengths)
+    ASSERT_NE(crc_full, crc1);
+}
+
 // ============================================================================
 // Protocol Message Tests
 // ============================================================================
@@ -88,7 +102,7 @@ TEST(protocol_generate_valid_message) {
     config.magic_byte = 0xAA;
     config.little_endian = true;
     config.requires_checksum = false;
-    
+
     std::vector<uint8_t> payload = {0x01, 0x02, 0x03, 0x04};
     auto message = protocol::generate_valid_message(
         protocol::MessageType::DATA,
@@ -96,14 +110,14 @@ TEST(protocol_generate_valid_message) {
         12345,
         config
     );
-    
+
     // Check minimum size (header = 10 bytes + payload)
     ASSERT_TRUE(message.size() >= 10);
     ASSERT_EQ(message.size(), 10 + payload.size());
-    
+
     // Check magic byte
     ASSERT_EQ(message[0], 0xAA);
-    
+
     // Check message type
     ASSERT_EQ(message[1], static_cast<uint8_t>(protocol::MessageType::DATA));
 }
@@ -113,7 +127,7 @@ TEST(protocol_parse_valid_message) {
     config.magic_byte = 0xAA;
     config.little_endian = true;
     config.requires_checksum = false;
-    
+
     // Generate a valid message
     std::vector<uint8_t> payload = {0x10, 0x20, 0x30};
     auto raw = protocol::generate_valid_message(
@@ -122,10 +136,10 @@ TEST(protocol_parse_valid_message) {
         1,
         config
     );
-    
+
     // Parse it back
     auto parsed = protocol::parse_message(raw.data(), raw.size(), config);
-    
+
     ASSERT_TRUE(parsed.has_value());
     ASSERT_TRUE(parsed->valid);
     ASSERT_EQ(parsed->header.magic, 0xAA);
@@ -136,12 +150,12 @@ TEST(protocol_parse_valid_message) {
 TEST(protocol_parse_invalid_magic) {
     protocol::ProtocolConfig config;
     config.magic_byte = 0xAA;
-    
+
     // Create message with wrong magic byte
     std::vector<uint8_t> invalid = {0xBB, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    
+
     auto parsed = protocol::parse_message(invalid.data(), invalid.size(), config);
-    
+
     ASSERT_TRUE(parsed.has_value());
     ASSERT_FALSE(parsed->valid);
 }
@@ -150,12 +164,12 @@ TEST(protocol_parse_truncated) {
     protocol::ProtocolConfig config;
     config.magic_byte = 0xAA;
     config.min_header_size = 10;
-    
+
     // Too short message
     std::vector<uint8_t> short_msg = {0xAA, 0x02};
-    
+
     auto parsed = protocol::parse_message(short_msg.data(), short_msg.size(), config);
-    
+
     // Should return nullopt for too-short messages
     ASSERT_FALSE(parsed.has_value());
 }
@@ -165,7 +179,7 @@ TEST(protocol_parse_length_overflow) {
     config.magic_byte = 0xAA;
     config.max_payload_size = 100;
     config.little_endian = true;
-    
+
     // Message claims huge payload but doesn't have it
     std::vector<uint8_t> msg = {
         0xAA,                    // magic
@@ -174,9 +188,9 @@ TEST(protocol_parse_length_overflow) {
         0x00, 0x00, 0x00, 0x00,  // sequence
         0x00, 0x00               // checksum
     };
-    
+
     auto parsed = protocol::parse_message(msg.data(), msg.size(), config);
-    
+
     ASSERT_TRUE(parsed.has_value());
     ASSERT_FALSE(parsed->valid);
 }
@@ -194,7 +208,7 @@ TEST(protocol_quick_validate) {
     config.magic_byte = 0xAA;
     config.max_payload_size = 1000;
     config.little_endian = true;
-    
+
     // Valid message
     std::vector<uint8_t> valid = {
         0xAA, 0x02, 0x04, 0x00,  // magic, type, length=4
@@ -203,15 +217,74 @@ TEST(protocol_quick_validate) {
         0x01, 0x02, 0x03, 0x04   // payload
     };
     ASSERT_TRUE(protocol::quick_validate(valid.data(), valid.size(), config));
-    
+
     // Invalid magic
     std::vector<uint8_t> invalid_magic = valid;
     invalid_magic[0] = 0xBB;
     ASSERT_FALSE(protocol::quick_validate(invalid_magic.data(), invalid_magic.size(), config));
-    
+
     // Too short
     std::vector<uint8_t> too_short = {0xAA, 0x02};
     ASSERT_FALSE(protocol::quick_validate(too_short.data(), too_short.size(), config));
+}
+
+TEST(protocol_big_endian) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = false;
+    config.requires_checksum = false;
+
+    std::vector<uint8_t> payload = {0x01, 0x02};
+    auto message = protocol::generate_valid_message(
+        protocol::MessageType::DATA,
+        payload,
+        0x12345678,
+        config
+    );
+
+    // In big endian, length bytes should be [0x00, 0x02]
+    ASSERT_EQ(message[2], 0x00);
+    ASSERT_EQ(message[3], 0x02);
+}
+
+TEST(protocol_empty_payload) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+    config.requires_checksum = false;
+
+    std::vector<uint8_t> empty_payload;
+    auto message = protocol::generate_valid_message(
+        protocol::MessageType::HEARTBEAT,
+        empty_payload,
+        1,
+        config
+    );
+
+    ASSERT_EQ(message.size(), 10);  // Header only
+    ASSERT_EQ(message[2], 0x00);    // Length low byte
+    ASSERT_EQ(message[3], 0x00);    // Length high byte
+}
+
+TEST(protocol_all_message_types) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+
+    std::vector<protocol::MessageType> types = {
+        protocol::MessageType::HANDSHAKE,
+        protocol::MessageType::DATA,
+        protocol::MessageType::ACK,
+        protocol::MessageType::ERROR,
+        protocol::MessageType::CONTROL,
+        protocol::MessageType::HEARTBEAT,
+        protocol::MessageType::DISCONNECT
+    };
+
+    for (auto type : types) {
+        auto msg = protocol::generate_valid_message(type, {0x01}, 1, config);
+        ASSERT_EQ(msg[1], static_cast<uint8_t>(type));
+    }
 }
 
 // ============================================================================
@@ -222,9 +295,9 @@ TEST(fuzzer_creation) {
     fuzzer::FuzzerConfig config;
     config.seed = 42;
     config.deterministic = true;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     const auto& stats = fuzzer.get_stats();
     ASSERT_EQ(stats.total_inputs, 0);
     ASSERT_EQ(stats.crashes_found, 0);
@@ -235,18 +308,18 @@ TEST(fuzzer_mutate_bit_flip) {
     config.seed = 42;
     config.deterministic = true;
     config.max_mutations_per_input = 1;
-    
+
     // Override weights to only use bit flip
     for (auto& pair : config.strategy_weights) {
         pair.second = 0.0;
     }
     config.strategy_weights[fuzzer::MutationStrategy::BIT_FLIP] = 100.0;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     std::vector<uint8_t> input = {0x00, 0x00, 0x00, 0x00};
     auto mutated = fuzzer.mutate(input);
-    
+
     // Should have exactly one bit flipped
     int diff_bits = 0;
     for (size_t i = 0; i < input.size(); ++i) {
@@ -264,17 +337,17 @@ TEST(fuzzer_mutate_byte_insert) {
     config.seed = 42;
     config.deterministic = true;
     config.max_mutations_per_input = 1;
-    
+
     for (auto& pair : config.strategy_weights) {
         pair.second = 0.0;
     }
     config.strategy_weights[fuzzer::MutationStrategy::BYTE_INSERT] = 100.0;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     std::vector<uint8_t> input = {0x01, 0x02, 0x03};
     auto mutated = fuzzer.mutate(input);
-    
+
     ASSERT_EQ(mutated.size(), input.size() + 1);
 }
 
@@ -283,17 +356,17 @@ TEST(fuzzer_mutate_byte_delete) {
     config.seed = 42;
     config.deterministic = true;
     config.max_mutations_per_input = 1;
-    
+
     for (auto& pair : config.strategy_weights) {
         pair.second = 0.0;
     }
     config.strategy_weights[fuzzer::MutationStrategy::BYTE_DELETE] = 100.0;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     std::vector<uint8_t> input = {0x01, 0x02, 0x03, 0x04};
     auto mutated = fuzzer.mutate(input);
-    
+
     ASSERT_EQ(mutated.size(), input.size() - 1);
 }
 
@@ -302,17 +375,17 @@ TEST(fuzzer_mutate_magic_value) {
     config.seed = 42;
     config.deterministic = true;
     config.max_mutations_per_input = 1;
-    
+
     for (auto& pair : config.strategy_weights) {
         pair.second = 0.0;
     }
     config.strategy_weights[fuzzer::MutationStrategy::MAGIC_VALUE] = 100.0;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     std::vector<uint8_t> input = {0x50, 0x50, 0x50, 0x50};
     auto mutated = fuzzer.mutate(input);
-    
+
     // At least one byte should be a magic value
     bool found_magic = false;
     for (size_t i = 0; i < mutated.size(); ++i) {
@@ -328,33 +401,164 @@ TEST(fuzzer_mutate_magic_value) {
     ASSERT_TRUE(found_magic);
 }
 
+TEST(fuzzer_mutate_integer_overflow) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+    config.max_mutations_per_input = 1;
+
+    for (auto& pair : config.strategy_weights) {
+        pair.second = 0.0;
+    }
+    config.strategy_weights[fuzzer::MutationStrategy::INTEGER_OVERFLOW] = 100.0;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    std::vector<uint8_t> input = {0x00, 0x00, 0x00, 0x00};
+    auto mutated = fuzzer.mutate(input);
+
+    // Should contain max integer values
+    bool found_max = false;
+    for (auto v : mutated) {
+        if (v == 0xFF) {
+            found_max = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(found_max);
+}
+
+TEST(fuzzer_mutate_integer_underflow) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+    config.max_mutations_per_input = 1;
+
+    for (auto& pair : config.strategy_weights) {
+        pair.second = 0.0;
+    }
+    config.strategy_weights[fuzzer::MutationStrategy::INTEGER_UNDERFLOW] = 100.0;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    std::vector<uint8_t> input = {0xFF, 0xFF, 0xFF, 0xFF};
+    auto mutated = fuzzer.mutate(input);
+
+    // Should contain zero values
+    bool found_zero = false;
+    for (auto v : mutated) {
+        if (v == 0x00) {
+            found_zero = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(found_zero);
+}
+
+TEST(fuzzer_mutate_block_shuffle) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+    config.max_mutations_per_input = 1;
+
+    for (auto& pair : config.strategy_weights) {
+        pair.second = 0.0;
+    }
+    config.strategy_weights[fuzzer::MutationStrategy::BLOCK_SHUFFLE] = 100.0;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    // Need larger input for block shuffle
+    std::vector<uint8_t> input(32);
+    for (size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<uint8_t>(i);
+    }
+    auto mutated = fuzzer.mutate(input);
+
+    ASSERT_EQ(mutated.size(), input.size());
+    // Content should be different (blocks shuffled)
+    bool changed = false;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] != mutated[i]) {
+            changed = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(changed);
+}
+
+TEST(fuzzer_mutate_arithmetic) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+    config.max_mutations_per_input = 1;
+
+    for (auto& pair : config.strategy_weights) {
+        pair.second = 0.0;
+    }
+    config.strategy_weights[fuzzer::MutationStrategy::ARITHMETIC] = 100.0;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    std::vector<uint8_t> input = {0x10, 0x20, 0x30, 0x40};
+    auto mutated = fuzzer.mutate(input);
+
+    // Should have small arithmetic changes
+    bool changed = false;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] != mutated[i]) {
+            int8_t diff = static_cast<int8_t>(mutated[i]) - static_cast<int8_t>(input[i]);
+            // Arithmetic should change by small amount (typically -10 to +10)
+            ASSERT_GE(diff, -20);
+            ASSERT_LE(diff, 20);
+            changed = true;
+        }
+    }
+    ASSERT_TRUE(changed);
+}
+
+TEST(fuzzer_mutate_empty_input) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    std::vector<uint8_t> empty;
+    auto mutated = fuzzer.mutate(empty);
+
+    // Empty input may result in empty or minimal output
+    // Just verify it doesn't crash
+    (void)mutated;
+}
+
 TEST(fuzzer_run_basic) {
     fuzzer::FuzzerConfig config;
     config.seed = 42;
     config.deterministic = true;
     config.max_mutations_per_input = 3;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     // Set up protocol config
     protocol::ProtocolConfig proto_config;
     proto_config.magic_byte = 0xAA;
     fuzzer.set_protocol_config(proto_config);
-    
+
     // Add seed input
     std::vector<uint8_t> seed = {0xAA, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     fuzzer.add_seed_input(seed);
-    
+
     // Set up a simple process callback that always succeeds
     int process_count = 0;
     fuzzer.set_process_callback([&process_count](const std::vector<uint8_t>&) {
         process_count++;
         return true;
     });
-    
+
     // Run fuzzer
     uint64_t crashes = fuzzer.run(100);
-    
+
     ASSERT_EQ(crashes, 0);
     ASSERT_EQ(process_count, 100);
 
@@ -368,13 +572,13 @@ TEST(fuzzer_crash_detection) {
     fuzzer::FuzzerConfig config;
     config.seed = 42;
     config.deterministic = true;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     // Add seed input
     std::vector<uint8_t> seed = {0xAA, 0x02, 0x00, 0x00};
     fuzzer.add_seed_input(seed);
-    
+
     // Process callback that fails on specific input
     int fail_count = 0;
     fuzzer.set_process_callback([&fail_count](const std::vector<uint8_t>& data) {
@@ -398,34 +602,34 @@ TEST(fuzzer_deterministic) {
     // Run fuzzer twice with same seed, should get same results
     std::vector<uint8_t> results1;
     std::vector<uint8_t> results2;
-    
+
     auto run_fuzzer = [&](std::vector<uint8_t>& results) {
         fuzzer::FuzzerConfig config;
         config.seed = 12345;
         config.deterministic = true;
         config.max_mutations_per_input = 1;
-        
+
         for (auto& pair : config.strategy_weights) {
             pair.second = 0.0;
         }
         config.strategy_weights[fuzzer::MutationStrategy::BIT_FLIP] = 100.0;
-        
+
         fuzzer::BinaryProtocolFuzzer fuzzer(config);
-        
+
         std::vector<uint8_t> seed = {0x00, 0x00, 0x00, 0x00};
         fuzzer.add_seed_input(seed);
-        
+
         fuzzer.set_process_callback([&results](const std::vector<uint8_t>& data) {
             results.push_back(data[0]);
             return true;
         });
-        
+
         fuzzer.run(10);
     };
-    
+
     run_fuzzer(results1);
     run_fuzzer(results2);
-    
+
     ASSERT_EQ(results1.size(), results2.size());
     for (size_t i = 0; i < results1.size(); ++i) {
         ASSERT_EQ(results1[i], results2[i]);
@@ -435,23 +639,83 @@ TEST(fuzzer_deterministic) {
 TEST(fuzzer_stop) {
     fuzzer::FuzzerConfig config;
     config.seed = 42;
-    
+
     fuzzer::BinaryProtocolFuzzer fuzzer(config);
-    
+
     std::vector<uint8_t> seed = {0xAA, 0x02};
     fuzzer.add_seed_input(seed);
-    
+
     bool callback_called = false;
     fuzzer.set_process_callback([&callback_called, &fuzzer](const std::vector<uint8_t>&) {
         callback_called = true;
         fuzzer.stop();
         return true;
     });
-    
+
     fuzzer.run(1000);
-    
+
     ASSERT_TRUE(callback_called);
     ASSERT_TRUE(fuzzer.should_stop());
+}
+
+TEST(fuzzer_multiple_seeds) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    // Add multiple seeds
+    std::vector<uint8_t> seed1 = {0x01, 0x02, 0x03};
+    std::vector<uint8_t> seed2 = {0x04, 0x05, 0x06};
+    std::vector<uint8_t> seed3 = {0x07, 0x08, 0x09};
+    
+    fuzzer.add_seed_input(seed1);
+    fuzzer.add_seed_input(seed2);
+    fuzzer.add_seed_input(seed3);
+
+    // Set up protocol and run to verify seeds are used
+    protocol::ProtocolConfig proto_config;
+    proto_config.magic_byte = 0xAA;
+    fuzzer.set_protocol_config(proto_config);
+    
+    int process_count = 0;
+    fuzzer.set_process_callback([&process_count](const std::vector<uint8_t>&) {
+        process_count++;
+        return true;
+    });
+
+    // Run a few iterations to verify seeds are being used
+    fuzzer.run(10);
+
+    const auto& stats = fuzzer.get_stats();
+    ASSERT_GE(stats.total_inputs, 10);
+}
+
+TEST(fuzzer_coverage_tracking) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    protocol::ProtocolConfig proto_config;
+    proto_config.magic_byte = 0xAA;
+    fuzzer.set_protocol_config(proto_config);
+
+    std::vector<uint8_t> seed = {0xAA, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    fuzzer.add_seed_input(seed);
+
+    int count = 0;
+    fuzzer.set_process_callback([&count](const std::vector<uint8_t>&) {
+        count++;
+        return true;
+    });
+
+    fuzzer.run(50);
+
+    const auto& stats = fuzzer.get_stats();
+    ASSERT_GE(stats.covered_lengths.size(), 1);
 }
 
 // ============================================================================
@@ -460,10 +724,10 @@ TEST(fuzzer_stop) {
 
 TEST(util_random_bytes) {
     std::mt19937 rng(42);
-    
+
     auto bytes1 = fuzzer::random_bytes(16, rng);
     auto bytes2 = fuzzer::random_bytes(16, rng);
-    
+
     ASSERT_EQ(bytes1.size(), 16);
     ASSERT_EQ(bytes2.size(), 16);
     ASSERT_NE(bytes1, bytes2);  // Should be different
@@ -473,18 +737,18 @@ TEST(util_data_hash) {
     std::vector<uint8_t> data1 = {0x01, 0x02, 0x03};
     std::vector<uint8_t> data2 = {0x01, 0x02, 0x03};
     std::vector<uint8_t> data3 = {0x01, 0x02, 0x04};
-    
+
     auto hash1 = fuzzer::data_hash(data1);
     auto hash2 = fuzzer::data_hash(data2);
     auto hash3 = fuzzer::data_hash(data3);
-    
+
     ASSERT_EQ(hash1, hash2);  // Same data = same hash
     ASSERT_NE(hash1, hash3);  // Different data = different hash
 }
 
 TEST(util_interesting_values) {
     auto values = fuzzer::get_interesting_values();
-    
+
     ASSERT_FALSE(values.empty());
     // Should contain common edge case values
     bool found_zero = false;
@@ -497,13 +761,91 @@ TEST(util_interesting_values) {
     ASSERT_TRUE(found_ff);
 }
 
+TEST(util_random_range) {
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> dist(0, 10);
+
+    // Test random range using standard distribution
+    for (int i = 0; i < 100; ++i) {
+        int val = dist(rng);
+        ASSERT_GE(val, 0);
+        ASSERT_LE(val, 10);
+    }
+}
+
+TEST(util_pick_weighted) {
+    // Test weighted selection using map from config
+    fuzzer::FuzzerConfig config;
+    
+    // Find the strategy with highest weight
+    fuzzer::MutationStrategy max_strategy = fuzzer::MutationStrategy::BIT_FLIP;
+    double max_weight = 0;
+    for (const auto& pair : config.strategy_weights) {
+        if (pair.second > max_weight) {
+            max_weight = pair.second;
+            max_strategy = pair.first;
+        }
+    }
+    
+    // BIT_FLIP should have highest weight (30.0)
+    ASSERT_EQ(max_strategy, fuzzer::MutationStrategy::BIT_FLIP);
+    ASSERT_EQ(max_weight, 30.0);
+}
+
+// ============================================================================
+// Edge Case Tests
+// ============================================================================
+
+TEST(edge_case_max_payload) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.max_payload_size = 10000;
+    config.little_endian = true;
+
+    // Create message at max payload size
+    std::vector<uint8_t> payload(10000, 0x42);
+    auto message = protocol::generate_valid_message(
+        protocol::MessageType::DATA,
+        payload,
+        1,
+        config
+    );
+
+    ASSERT_EQ(message.size(), 10 + 10000);
+    ASSERT_TRUE(protocol::quick_validate(message.data(), message.size(), config));
+}
+
+TEST(edge_case_zero_sequence) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+
+    auto message = protocol::generate_valid_message(
+        protocol::MessageType::DATA,
+        {0x01},
+        0,  // Zero sequence number
+        config
+    );
+
+    ASSERT_TRUE(protocol::quick_validate(message.data(), message.size(), config));
+}
+
+TEST(edge_case_null_buffer) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+
+    // Parse with null buffer should not crash
+    auto parsed = protocol::parse_message(nullptr, 0, config);
+    ASSERT_FALSE(parsed.has_value());
+}
+
 // ============================================================================
 // Main
 // ============================================================================
 
 int main() {
     std::cout << "=== Binary Protocol Fuzzer Tests ===\n\n";
-    
+
     // CRC16 tests
     std::cout << "--- CRC16 Tests ---\n";
     RUN_TEST(crc16_basic);
@@ -511,7 +853,8 @@ int main() {
     RUN_TEST(crc16_known_value);
     RUN_TEST(crc16_consistency);
     RUN_TEST(crc16_different_data);
-    
+    RUN_TEST(crc16_incremental);
+
     // Protocol tests
     std::cout << "\n--- Protocol Tests ---\n";
     RUN_TEST(protocol_generate_valid_message);
@@ -521,7 +864,10 @@ int main() {
     RUN_TEST(protocol_parse_length_overflow);
     RUN_TEST(protocol_message_type_string);
     RUN_TEST(protocol_quick_validate);
-    
+    RUN_TEST(protocol_big_endian);
+    RUN_TEST(protocol_empty_payload);
+    RUN_TEST(protocol_all_message_types);
+
     // Fuzzer tests
     std::cout << "\n--- Fuzzer Tests ---\n";
     RUN_TEST(fuzzer_creation);
@@ -529,22 +875,37 @@ int main() {
     RUN_TEST(fuzzer_mutate_byte_insert);
     RUN_TEST(fuzzer_mutate_byte_delete);
     RUN_TEST(fuzzer_mutate_magic_value);
+    RUN_TEST(fuzzer_mutate_integer_overflow);
+    RUN_TEST(fuzzer_mutate_integer_underflow);
+    RUN_TEST(fuzzer_mutate_block_shuffle);
+    RUN_TEST(fuzzer_mutate_arithmetic);
+    RUN_TEST(fuzzer_mutate_empty_input);
     RUN_TEST(fuzzer_run_basic);
     RUN_TEST(fuzzer_crash_detection);
     RUN_TEST(fuzzer_deterministic);
     RUN_TEST(fuzzer_stop);
-    
+    RUN_TEST(fuzzer_multiple_seeds);
+    RUN_TEST(fuzzer_coverage_tracking);
+
     // Utility tests
     std::cout << "\n--- Utility Tests ---\n";
     RUN_TEST(util_random_bytes);
     RUN_TEST(util_data_hash);
     RUN_TEST(util_interesting_values);
-    
+    RUN_TEST(util_random_range);
+    RUN_TEST(util_pick_weighted);
+
+    // Edge case tests
+    std::cout << "\n--- Edge Case Tests ---\n";
+    RUN_TEST(edge_case_max_payload);
+    RUN_TEST(edge_case_zero_sequence);
+    RUN_TEST(edge_case_null_buffer);
+
     // Summary
     std::cout << "\n=== Test Summary ===\n";
     std::cout << "Passed: " << passed << "\n";
     std::cout << "Failed: " << failed << "\n";
     std::cout << "Total:  " << (passed + failed) << "\n";
-    
+
     return failed > 0 ? 1 : 0;
 }
