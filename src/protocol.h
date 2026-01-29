@@ -39,7 +39,7 @@ struct ParsedMessage {
     std::vector<uint8_t> payload;
     bool valid;
     std::string error_message;
-    
+
     ParsedMessage() : valid(false) {
         header = {};
     }
@@ -52,13 +52,35 @@ struct ProtocolConfig {
     size_t max_payload_size;
     bool requires_checksum;
     bool little_endian;
-    
-    ProtocolConfig() 
+
+    ProtocolConfig()
         : magic_byte(0xAA)
         , min_header_size(10)
         , max_payload_size(65535)
         , requires_checksum(true)
         , little_endian(false) {}
+};
+
+// Validation result codes for detailed error reporting
+enum class ValidationResult {
+    OK,
+    ERROR_NULL_POINTER,
+    ERROR_INSUFFICIENT_DATA,
+    ERROR_INVALID_MAGIC,
+    ERROR_UNKNOWN_MESSAGE_TYPE,
+    ERROR_PAYLOAD_TOO_LARGE,
+    ERROR_TRUNCATED_MESSAGE,
+    ERROR_CHECKSUM_MISMATCH,
+    ERROR_INVALID_LENGTH_FIELD
+};
+
+// Extended parsing result with detailed error information
+struct ParseResult {
+    ParsedMessage message;
+    ValidationResult result;
+    std::string error_detail;
+
+    ParseResult() : result(ValidationResult::OK) {}
 };
 
 // CRC16 calculation for message integrity verification
@@ -72,7 +94,14 @@ void header_from_network(MessageHeader& header, bool little_endian);
 // Parse raw bytes into a structured message
 // Returns nullopt if the data is too short or malformed
 std::optional<ParsedMessage> parse_message(
-    const uint8_t* data, 
+    const uint8_t* data,
+    size_t length,
+    const ProtocolConfig& config
+);
+
+// Parse with detailed error reporting
+ParseResult parse_message_detailed(
+    const uint8_t* data,
     size_t length,
     const ProtocolConfig& config
 );
@@ -90,6 +119,9 @@ bool quick_validate(const uint8_t* data, size_t length, const ProtocolConfig& co
 
 // Get human-readable message type name for reporting
 std::string message_type_to_string(MessageType type);
+
+// Get human-readable validation result description
+std::string validation_result_to_string(ValidationResult result);
 
 // Generate a valid message with the given parameters
 // Used as seed for fuzzing campaigns
