@@ -38,7 +38,6 @@ add_executable(fuzzer
 
 target_include_directories(fuzzer PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-# Enable threading support
 find_package(Threads REQUIRED)
 target_link_libraries(fuzzer PRIVATE Threads::Threads)
 
