@@ -840,6 +840,159 @@ TEST(edge_case_null_buffer) {
 }
 
 // ============================================================================
+// Malformed Packet Validation Tests
+// ============================================================================
+
+TEST(malformed_reserved_type_zero) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+
+    // Message type 0x00 is reserved
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0x00,                    // type = RESERVED (invalid)
+        0x04, 0x00,              // length = 4
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0x00, 0x00               // checksum
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::ERROR_RESERVED_TYPE);
+}
+
+TEST(malformed_length_mismatch) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+    config.requires_checksum = false;
+
+    // Length field says 2 bytes, but we have 4 bytes of payload
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0x02,                    // type = DATA
+        0x02, 0x00,              // length = 2 (but actual is 4)
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0x00, 0x00,              // checksum
+        0x01, 0x02, 0x03, 0x04   // 4 bytes payload (exceeds declared length)
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::ERROR_LENGTH_MISMATCH);
+}
+
+TEST(malformed_invalid_checksum_field) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+    config.requires_checksum = true;
+
+    // Message with 0x0000 checksum - CRC of header won't be 0x0000 for this data
+    // Using payload that produces a non-zero CRC
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0x02,                    // type = DATA
+        0x04, 0x00,              // length = 4
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0x00, 0x00,              // checksum = 0x0000 (suspicious, won't match)
+        0xDE, 0xAD, 0xBE, 0xEF   // payload that produces non-zero CRC
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::ERROR_INVALID_CHECKSUM_FIELD);
+}
+
+TEST(malformed_invalid_checksum_field_ffff) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+    config.requires_checksum = true;
+
+    // Message with 0xFFFF checksum - CRC of header won't be 0xFFFF for this data
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0x02,                    // type = DATA
+        0x04, 0x00,              // length = 4
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0xFF, 0xFF,              // checksum = 0xFFFF (suspicious, won't match)
+        0xDE, 0xAD, 0xBE, 0xEF   // payload that produces non-FFFF CRC
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::ERROR_INVALID_CHECKSUM_FIELD);
+}
+
+TEST(malformed_unknown_type_high) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+
+    // Message type 0xFF is unknown
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0xFF,                    // type = UNKNOWN (invalid)
+        0x04, 0x00,              // length = 4
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0x00, 0x00               // checksum
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::ERROR_UNKNOWN_MESSAGE_TYPE);
+}
+
+TEST(malformed_validation_result_strings) {
+    // Test new validation result string conversions
+    ASSERT_EQ(protocol::validation_result_to_string(
+        protocol::ValidationResult::ERROR_LENGTH_MISMATCH), "Length field mismatch");
+    ASSERT_EQ(protocol::validation_result_to_string(
+        protocol::ValidationResult::ERROR_RESERVED_TYPE), "Reserved message type");
+    ASSERT_EQ(protocol::validation_result_to_string(
+        protocol::ValidationResult::ERROR_INVALID_CHECKSUM_FIELD), "Invalid checksum field");
+}
+
+TEST(malformed_exact_length_match) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+    config.requires_checksum = false;
+
+    // Valid message where actual payload exactly matches declared length
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0x02,                    // type = DATA
+        0x02, 0x00,              // length = 2
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0x00, 0x00,              // checksum
+        0x01, 0x02               // exactly 2 bytes payload
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::OK);
+    ASSERT_TRUE(result.message.valid);
+}
+
+TEST(malformed_trailing_garbage) {
+    protocol::ProtocolConfig config;
+    config.magic_byte = 0xAA;
+    config.little_endian = true;
+    config.requires_checksum = false;
+
+    // Message with extra trailing bytes (garbage after payload)
+    std::vector<uint8_t> msg = {
+        0xAA,                    // magic
+        0x02,                    // type = DATA
+        0x02, 0x00,              // length = 2
+        0x00, 0x00, 0x00, 0x00,  // sequence
+        0x00, 0x00,              // checksum
+        0x01, 0x02,              // 2 bytes payload
+        0xDE, 0xAD, 0xBE, 0xEF   // trailing garbage
+    };
+
+    auto result = protocol::parse_message_detailed(msg.data(), msg.size(), config);
+    ASSERT_EQ(result.result, protocol::ValidationResult::ERROR_LENGTH_MISMATCH);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -900,6 +1053,17 @@ int main() {
     RUN_TEST(edge_case_max_payload);
     RUN_TEST(edge_case_zero_sequence);
     RUN_TEST(edge_case_null_buffer);
+
+    // Malformed packet validation tests
+    std::cout << "\n--- Malformed Packet Validation Tests ---\n";
+    RUN_TEST(malformed_reserved_type_zero);
+    RUN_TEST(malformed_length_mismatch);
+    RUN_TEST(malformed_invalid_checksum_field);
+    RUN_TEST(malformed_invalid_checksum_field_ffff);
+    RUN_TEST(malformed_unknown_type_high);
+    RUN_TEST(malformed_validation_result_strings);
+    RUN_TEST(malformed_exact_length_match);
+    RUN_TEST(malformed_trailing_garbage);
 
     // Summary
     std::cout << "\n=== Test Summary ===\n";
