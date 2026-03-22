@@ -200,15 +200,21 @@ ParseResult parse_message_detailed(
         return result;
     }
 
-    // Validate message type
+    // Validate message type - check for valid range and reserved types
     uint8_t msg_type = static_cast<uint8_t>(result.message.header.type);
+    if (msg_type == 0x00) {
+        // Type 0x00 is UNKNOWN/reserved - reject explicitly
+        result.result = ValidationResult::ERROR_RESERVED_TYPE;
+        result.error_detail = "Message type 0x00 is reserved and not allowed";
+        return result;
+    }
     if (msg_type > 0x07) {
         result.result = ValidationResult::ERROR_UNKNOWN_MESSAGE_TYPE;
         result.error_detail = "Unknown message type: 0x" + to_hex(msg_type);
         return result;
     }
 
-    // Validate payload length field
+    // Validate payload length field - check for zero-length with non-zero actual data
     if (result.message.header.length > config.max_payload_size) {
         result.result = ValidationResult::ERROR_PAYLOAD_TOO_LARGE;
         result.error_detail = "Payload length " + std::to_string(result.message.header.length) +
@@ -217,7 +223,8 @@ ParseResult parse_message_detailed(
         return result;
     }
 
-    // Validate that we have enough data for the claimed payload
+    // Validate that length field is consistent with actual data
+    // Length field claims more payload than we have
     size_t total_expected = sizeof(MessageHeader) + result.message.header.length;
     if (length < total_expected) {
         result.result = ValidationResult::ERROR_TRUNCATED_MESSAGE;
@@ -225,6 +232,37 @@ ParseResult parse_message_detailed(
                              std::to_string(total_expected) + " bytes, got " +
                              std::to_string(length);
         return result;
+    }
+
+    // Check for length field mismatch - actual data exceeds claimed length
+    // This catches malformed packets where length is understated
+    size_t actual_payload = length - sizeof(MessageHeader);
+    if (actual_payload > result.message.header.length) {
+        result.result = ValidationResult::ERROR_LENGTH_MISMATCH;
+        result.error_detail = "Actual payload " + std::to_string(actual_payload) +
+                             " exceeds declared length " +
+                             std::to_string(result.message.header.length);
+        return result;
+    }
+
+    // Validate checksum field - reject packets with suspicious checksum values
+    // All-zero or all-ones checksums often indicate corrupted/uninitialized data
+    if (config.requires_checksum) {
+        uint16_t computed = calculate_crc16(data, sizeof(MessageHeader) - 2);
+        
+        // Check for suspicious checksum values that don't match computed CRC
+        if ((result.message.header.checksum == 0x0000 || 
+            result.message.header.checksum == 0xFFFF) &&
+            computed != result.message.header.checksum) {
+            result.result = ValidationResult::ERROR_INVALID_CHECKSUM_FIELD;
+            result.error_detail = "Suspicious checksum value 0x" +
+                                 to_hex(result.message.header.checksum >> 8) +
+                                 to_hex(result.message.header.checksum & 0xFF) +
+                                 " does not match computed 0x" +
+                                 to_hex(computed >> 8) +
+                                 to_hex(computed & 0xFF);
+            return result;
+        }
     }
 
     // Copy payload if present
@@ -350,6 +388,12 @@ std::string validation_result_to_string(ValidationResult result) {
             return "Checksum mismatch";
         case ValidationResult::ERROR_INVALID_LENGTH_FIELD:
             return "Invalid length field";
+        case ValidationResult::ERROR_LENGTH_MISMATCH:
+            return "Length field mismatch";
+        case ValidationResult::ERROR_RESERVED_TYPE:
+            return "Reserved message type";
+        case ValidationResult::ERROR_INVALID_CHECKSUM_FIELD:
+            return "Invalid checksum field";
         default:
             return "Unknown error";
     }

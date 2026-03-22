@@ -71,7 +71,10 @@ enum class ValidationResult {
     ERROR_PAYLOAD_TOO_LARGE,
     ERROR_TRUNCATED_MESSAGE,
     ERROR_CHECKSUM_MISMATCH,
-    ERROR_INVALID_LENGTH_FIELD
+    ERROR_INVALID_LENGTH_FIELD,
+    ERROR_LENGTH_MISMATCH,
+    ERROR_RESERVED_TYPE,
+    ERROR_INVALID_CHECKSUM_FIELD
 };
 
 // Extended parsing result with detailed error information
