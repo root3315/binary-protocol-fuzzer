@@ -6,6 +6,8 @@
 #include <cstring>
 #include <iostream>
 #include <functional>
+#include <memory>
+#include <mutex>
 
 namespace fuzzer {
 
@@ -75,7 +77,7 @@ bool BinaryProtocolFuzzer::load_seed_file(const std::string& path) {
         return false;
     }
 
-    std::vector<uint8_t> buffer(size);
+    std::vector<uint8_t> buffer(static_cast<size_t>(size));
     if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
         return false;
     }
@@ -90,21 +92,51 @@ bool BinaryProtocolFuzzer::execute_with_timeout(
 ) {
     auto exec_start = std::chrono::steady_clock::now();
 
-    std::packaged_task<bool(const std::vector<uint8_t>&)> task(process_callback_);
-    std::future<bool> future = task.get_future();
+    std::atomic<bool> task_completed{false};
+    std::atomic<bool> task_success{false};
+    std::string task_error;
+    std::mutex error_mutex;
 
-    std::thread worker([&task, &input]() {
-        task(input);
+    std::thread worker([&]() {
+        try {
+            bool success = process_callback_(input);
+            task_success.store(success);
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            task_error = e.what();
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            task_error = "Unknown exception";
+        }
+        task_completed.store(true);
     });
 
     auto timeout = std::chrono::microseconds(config_.timeout_us);
-    std::future_status status = future.wait_for(timeout);
+    
+    bool completed = false;
+    while (!completed) {
+        auto wait_start = std::chrono::steady_clock::now();
+        auto remaining = timeout - std::chrono::duration_cast<std::chrono::microseconds>(
+            wait_start - exec_start);
+        
+        if (remaining.count() <= 0) {
+            break;
+        }
+        
+        if (task_completed.load()) {
+            completed = true;
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(
+                std::min(static_cast<int64_t>(100), remaining.count())));
+        }
+    }
 
     auto exec_end = std::chrono::steady_clock::now();
-    result.execution_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        exec_end - exec_start).count();
+    result.execution_time_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            exec_end - exec_start).count());
 
-    if (status == std::future_status::timeout) {
+    if (!completed) {
         result.hang_detected = true;
         result.timeout_enforced = true;
         result.error_message = "Timeout exceeded - execution terminated";
@@ -114,20 +146,21 @@ bool BinaryProtocolFuzzer::execute_with_timeout(
 
     worker.join();
 
-    try {
-        bool success = future.get();
-        if (!success) {
-            result.crash_detected = true;
-            result.error_message = "Processing failed";
-            return false;
-        }
-    } catch (const std::exception& e) {
+    std::string error_copy;
+    {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        error_copy = task_error;
+    }
+
+    if (!error_copy.empty()) {
         result.crash_detected = true;
-        result.error_message = e.what();
+        result.error_message = error_copy;
         return false;
-    } catch (...) {
+    }
+
+    if (!task_success.load()) {
         result.crash_detected = true;
-        result.error_message = "Unknown exception";
+        result.error_message = "Processing failed";
         return false;
     }
 
@@ -181,7 +214,7 @@ uint64_t BinaryProtocolFuzzer::run(uint64_t iterations) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - total_start).count();
             if (elapsed > 0) {
-                stats_.inputs_per_second = (i + 1) / elapsed;
+                stats_.inputs_per_second = static_cast<uint64_t>((i + 1) / static_cast<int64_t>(elapsed));
             }
         }
     }
@@ -300,7 +333,7 @@ std::vector<uint8_t> BinaryProtocolFuzzer::mutate_bit_flip(const std::vector<uin
     size_t pos = pos_dist(rng_);
     int bit = bit_dist(rng_);
 
-    result[pos] ^= (1 << bit);
+    result[pos] ^= static_cast<uint8_t>(1 << bit);
     return result;
 }
 
@@ -328,7 +361,7 @@ std::vector<uint8_t> BinaryProtocolFuzzer::mutate_byte_insert(const std::vector<
     size_t pos = pos_dist(rng_);
     uint8_t value = static_cast<uint8_t>(byte_dist(rng_));
 
-    result.insert(result.begin() + pos, value);
+    result.insert(result.begin() + static_cast<std::ptrdiff_t>(pos), value);
     return result;
 }
 
@@ -341,7 +374,7 @@ std::vector<uint8_t> BinaryProtocolFuzzer::mutate_byte_delete(const std::vector<
     std::uniform_int_distribution<size_t> pos_dist(0, result.size() - 1);
 
     size_t pos = pos_dist(rng_);
-    result.erase(result.begin() + pos);
+    result.erase(result.begin() + static_cast<std::ptrdiff_t>(pos));
     return result;
 }
 
@@ -355,7 +388,7 @@ std::vector<uint8_t> BinaryProtocolFuzzer::mutate_byte_duplicate(const std::vect
 
     size_t pos = pos_dist(rng_);
     uint8_t value = result[pos];
-    result.insert(result.begin() + pos, value);
+    result.insert(result.begin() + static_cast<std::ptrdiff_t>(pos), value);
     return result;
 }
 
@@ -480,17 +513,17 @@ std::vector<uint8_t> BinaryProtocolFuzzer::mutate_interesting_value(const std::v
         case 1: {
             std::uniform_int_distribution<size_t> val_dist(0, sizeof(INTERESTING_16) - 1);
             uint16_t val = INTERESTING_16[val_dist(rng_)];
-            result[pos] = val & 0xFF;
+            result[pos] = static_cast<uint8_t>(val & 0xFF);
             if (pos + 1 < result.size()) {
-                result[pos + 1] = (val >> 8) & 0xFF;
+                result[pos + 1] = static_cast<uint8_t>((val >> 8) & 0xFF);
             }
             break;
         }
         case 2: {
             std::uniform_int_distribution<size_t> val_dist(0, sizeof(INTERESTING_32) - 1);
             uint32_t val = INTERESTING_32[val_dist(rng_)];
-            for (int i = 0; i < 4 && pos + i < result.size(); ++i) {
-                result[pos + i] = (val >> (i * 8)) & 0xFF;
+            for (int i = 0; i < 4 && pos + static_cast<size_t>(i) < result.size(); ++i) {
+                result[pos + static_cast<size_t>(i)] = static_cast<uint8_t>((val >> (i * 8)) & 0xFF);
             }
             break;
         }
@@ -531,8 +564,8 @@ void BinaryProtocolFuzzer::update_stats(const FuzzResult& result) {
     }
 
     double current_avg = stats_.avg_execution_time_ms;
-    double new_value = result.execution_time_us / 1000.0;
-    stats_.avg_execution_time_ms = current_avg + (new_value - current_avg) / stats_.total_inputs;
+    double new_value = static_cast<double>(result.execution_time_us) / 1000.0;
+    stats_.avg_execution_time_ms = current_avg + (new_value - current_avg) / static_cast<double>(stats_.total_inputs);
 }
 
 bool BinaryProtocolFuzzer::is_unique_crash(const std::vector<uint8_t>& input) {
@@ -597,7 +630,7 @@ bool write_crash_file(const std::string& path, const std::vector<uint8_t>& data)
         return false;
     }
 
-    file.write(reinterpret_cast<const char*>(data.data()), data.size());
+    file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     return file.good();
 }
 
