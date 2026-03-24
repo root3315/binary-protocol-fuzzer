@@ -9,7 +9,7 @@
 #include <map>
 #include <set>
 #include <chrono>
-#include <future>
+#include <thread>
 #include <atomic>
 
 namespace fuzzer {
