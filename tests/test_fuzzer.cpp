@@ -993,6 +993,171 @@ TEST(malformed_trailing_garbage) {
 }
 
 // ============================================================================
+// Corpus Save/Load Tests
+// ============================================================================
+
+#include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
+
+static bool directory_exists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool remove_directory_recursive(const std::string& path) {
+    DIR* dir = opendir(path.c_str());
+    if (!dir) {
+        return false;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        std::string full_path = path + "/" + entry->d_name;
+        remove(full_path.c_str());
+    }
+
+    closedir(dir);
+    rmdir(path.c_str());
+    return true;
+}
+
+TEST(corpus_save_empty) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    // Save empty corpus should return false
+    std::string test_dir = "/tmp/fuzzer_test_corpus_empty";
+    ASSERT_FALSE(fuzzer.save_corpus(test_dir));
+}
+
+TEST(corpus_save_and_load) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+    config.max_input_size = 4096;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    // Add some seed inputs
+    std::vector<uint8_t> seed1 = {0xAA, 0x02, 0x04, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+    std::vector<uint8_t> seed2 = {0xBB, 0x03, 0x02, 0x00, 0xDE, 0xAD};
+    std::vector<uint8_t> seed3 = {0xCC, 0x04, 0x08, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+
+    fuzzer.add_seed_input(seed1);
+    fuzzer.add_seed_input(seed2);
+    fuzzer.add_seed_input(seed3);
+
+    std::string test_dir = "/tmp/fuzzer_test_corpus_save";
+
+    // Save corpus
+    ASSERT_TRUE(fuzzer.save_corpus(test_dir));
+    ASSERT_TRUE(directory_exists(test_dir));
+
+    // Load into new fuzzer
+    fuzzer::FuzzerConfig config2;
+    config2.seed = 123;
+    config2.deterministic = true;
+    config2.max_input_size = 4096;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer2(config2);
+    ASSERT_TRUE(fuzzer2.load_corpus(test_dir));
+
+    const auto& stats = fuzzer2.get_stats();
+    (void)stats;
+
+    // Cleanup
+    remove_directory_recursive(test_dir);
+}
+
+TEST(corpus_load_nonexistent) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    // Load from nonexistent directory should return false
+    ASSERT_FALSE(fuzzer.load_corpus("/tmp/nonexistent_fuzzer_test_dir"));
+}
+
+TEST(corpus_load_empty_directory) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer(config);
+
+    std::string test_dir = "/tmp/fuzzer_test_corpus_empty_dir";
+    std::string mkdir_cmd = "mkdir -p " + test_dir;
+    system(mkdir_cmd.c_str());
+
+    // Load from empty directory should return false
+    ASSERT_FALSE(fuzzer.load_corpus(test_dir));
+
+    // Cleanup
+    rmdir(test_dir.c_str());
+}
+
+TEST(corpus_roundtrip) {
+    fuzzer::FuzzerConfig config;
+    config.seed = 42;
+    config.deterministic = true;
+    config.max_input_size = 4096;
+
+    // Create original fuzzer with seeds
+    fuzzer::BinaryProtocolFuzzer fuzzer1(config);
+
+    std::vector<uint8_t> seed1 = {0x01, 0x02, 0x03, 0x04, 0x05};
+    std::vector<uint8_t> seed2 = {0xAA, 0xBB, 0xCC, 0xDD};
+    fuzzer1.add_seed_input(seed1);
+    fuzzer1.add_seed_input(seed2);
+
+    std::string test_dir = "/tmp/fuzzer_test_corpus_roundtrip";
+
+    // Save and reload
+    ASSERT_TRUE(fuzzer1.save_corpus(test_dir));
+
+    fuzzer::FuzzerConfig config2;
+    config2.seed = 999;
+    config2.deterministic = true;
+    config2.max_input_size = 4096;
+
+    fuzzer::BinaryProtocolFuzzer fuzzer2(config2);
+    ASSERT_TRUE(fuzzer2.load_corpus(test_dir));
+
+    // Run both fuzzers and compare outputs
+    std::vector<uint8_t> results1;
+    std::vector<uint8_t> results2;
+
+    fuzzer1.set_process_callback([&results1](const std::vector<uint8_t>& data) {
+        if (!data.empty()) results1.push_back(data[0]);
+        return true;
+    });
+
+    fuzzer2.set_process_callback([&results2](const std::vector<uint8_t>& data) {
+        if (!data.empty()) results2.push_back(data[0]);
+        return true;
+    });
+
+    fuzzer1.run(50);
+    fuzzer2.run(50);
+
+    // With same seed and same corpus, results should be identical
+    ASSERT_EQ(results1.size(), results2.size());
+
+    // Cleanup
+    remove_directory_recursive(test_dir);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

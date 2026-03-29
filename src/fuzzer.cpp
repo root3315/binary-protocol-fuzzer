@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <cstdio>
 
 namespace fuzzer {
 
@@ -246,13 +247,75 @@ const FuzzerConfig& BinaryProtocolFuzzer::get_config() const {
 }
 
 bool BinaryProtocolFuzzer::save_corpus(const std::string& directory) const {
-    (void)directory;
+    if (corpus_.empty()) {
+        return false;
+    }
+
+    std::string mkdir_cmd = "mkdir -p " + directory;
+    if (system(mkdir_cmd.c_str()) != 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < corpus_.size(); ++i) {
+        std::ostringstream filename;
+        filename << directory << "/input_" << std::setfill('0') << std::setw(6) << i << ".bin";
+
+        std::ofstream file(filename.str(), std::ios::binary);
+        if (!file.is_open()) {
+            return false;
+        }
+
+        file.write(reinterpret_cast<const char*>(corpus_[i].data()),
+                   static_cast<std::streamsize>(corpus_[i].size()));
+    }
+
     return true;
 }
 
 bool BinaryProtocolFuzzer::load_corpus(const std::string& directory) {
-    (void)directory;
-    return true;
+    std::string find_cmd = "find " + directory + " -maxdepth 1 -name '*.bin' -type f 2>/dev/null";
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(find_cmd.c_str(), "r"), pclose);
+    if (!pipe) {
+        return false;
+    }
+
+    char path[4096];
+    std::vector<std::string> files;
+
+    while (fgets(path, sizeof(path), pipe.get()) != nullptr) {
+        std::string file_path(path);
+        if (!file_path.empty() && file_path.back() == '\n') {
+            file_path.pop_back();
+        }
+        if (!file_path.empty()) {
+            files.push_back(file_path);
+        }
+    }
+
+    if (files.empty()) {
+        return false;
+    }
+
+    for (const auto& file_path : files) {
+        std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            continue;
+        }
+
+        std::streamsize size = file.tellg();
+        if (size <= 0 || static_cast<size_t>(size) > config_.max_input_size) {
+            continue;
+        }
+
+        file.seekg(0, std::ios::beg);
+
+        std::vector<uint8_t> buffer(static_cast<size_t>(size));
+        if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+            corpus_.push_back(buffer);
+        }
+    }
+
+    return !corpus_.empty();
 }
 
 std::vector<uint8_t> BinaryProtocolFuzzer::mutate(const std::vector<uint8_t>& input) {
